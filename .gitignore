@@ -1,0 +1,15 @@
+# 大模型产物一律不入库（发布到 GitHub Releases）
+*.gguf
+*.gguf.part
+models/
+base/
+merged/
+q8/
+
+# 本地运行产物
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+tmp/
+*.log
