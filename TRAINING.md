@@ -124,3 +124,19 @@ python scripts/daytona_ctl.py exec-bg "/home/daytona/venv/bin/python /home/dayto
 ## 6. 实测数据
 
 见 `train/metrics.md`（loss 曲线、每步耗时、最终困惑度）。
+
+## 7. ONNX int4 导出（2026-10 新增，主交付格式）
+
+最终交付从 GGUF 改为 **ONNX int4 单图**（onnxruntime，与 APP 的 MOSS-TTS 原生核同栈）。
+GGUF IQ4_XS 保留为备份格式。
+
+链路：merged bf16 → `onnx_export.py export`（fp16 单图，external_data）→
+`fold`（把 `MatMul(x, Transpose(W))` 的 Transpose 流式折进权重，**不做这步量化器会全部跳过**）→
+`quantize`（ORT `matmul_nbits_quantizer`，block=64 对称，253 个 MatMulNBits 节点）→
+`package`（+ tokenizer/config/chat_template/SHA256SUMS）。
+
+产物：model.onnx 2.2 MB + model.onnx.data 1.85 GiB；沙箱 4 核 CPU 实测
+session 5 s / prefill 237 tok 8 s / 30 token 生成 12 s，工具调用输出正确。
+
+分发：魔搭 `Kobexz/miro-2b` 的 `onnx/` 目录（APP 下载源）+ GitHub release `miro-2b-onnx`（备份）。
+LoRA adapter 与 merged bf16 永久存 GitHub release `miro-2b-src`，转格式不重训。

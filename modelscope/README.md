@@ -1,87 +1,104 @@
 ---
 license: other
 tags:
-  - llama-cpp
-  - gguf
+  - onnx
+  - onnxruntime
+  - int4
+  - matmul-nbits
   - tool-calling
   - function-calling
-  - gguf-iq4-xs
   - minicpm5
   - on-device
   - agent
 frameworks:
-  - llama.cpp
+  - onnxruntime
 tasks:
   - text-generation
 ---
 
 # miro-2b
 
-端侧工具调用小模型，为 Miro（原 orion_agent）桌面端/移动端设计。单一 GGUF 文件，`IQ4_XS` 量化，**约 1.4GB**，可直接用 llama.cpp 在手机 CPU 上推理。
+端侧工具调用小模型，为 Miro（原 orion_agent）设计。**主交付格式是 ONNX int4**（onnxruntime，与 APP 里已有的 MOSS-TTS 原生核同一套栈），GGUF 仅作 llama.cpp 路线的备份。
 
-## 模型信息
+## 产物
 
-| 项 | 值 |
-| --- | --- |
-| 基座 | `insraq/MiniCPM5-2B-heretic-abliterated`（2.52B，已 heretic 消音） |
-| 微调 | LoRA SFT（r=16 / α=32，全线性层），200 步，loss 1.2883 → 0.1250 |
-| 训练数据 | ToolACE 2200 条 + Hermes function-calling(singleturn) 1832 条 → 2896 条可用 |
-| 量化 | `IQ4_XS`，4.54 BPW，**1,433,338,624 B**（≈1.34 GiB） |
-| sha256 | `936c2c16bafca37212d2b4551bc8749bed2e2eb04074cfeb1aeec960bd73a9d2` |
-| 上下文 | 131072（端侧建议 4096–8192） |
-| 参数 | text-generation，支持工具调用 |
+| 目录 | 内容 | 体积 |
+| --- | --- | --- |
+| `onnx/` | **int4 ONNX**（`model.onnx` + `model.onnx.data`）+ tokenizer + chat template | **1.85 GiB** |
+| 根目录 | `miro-2b-IQ4_XS.gguf`（llama.cpp 路线） | 1.34 GiB |
 
-## 下载
-
-```bash
-# ModelScope CLI
-modelscope download --model Kobexz/miro-2b miro-2b-IQ4_XS.gguf
-
-# 或直链（魔搭 resolve 地址）
-https://www.modelscope.cn/models/Kobexz/miro-2b/resolve/master/miro-2b-IQ4_XS.gguf
+```
+onnx/model.onnx                2,288,117 B     图定义
+onnx/model.onnx.data       1,988,743,168 B     int4 权重（embedding 保留 fp16）
+onnx/tokenizer.json            9,894,424 B
+onnx/tokenizer_config.json           436 B
+onnx/config.json                     749 B
+onnx/generation_config.json          214 B
+onnx/chat_template.jinja           9,060 B
+onnx/SHA256SUMS.txt                  581 B
 ```
 
-## 工具调用格式
+下载直链：`https://www.modelscope.cn/models/Kobexz/miro-2b/resolve/master/onnx/model.onnx.data`
 
-模型输出 MiniCPM5 原生 XML：
+## 量化参数
+
+- **int4 权重仅量化**：`MatMulNBits` 算子，block=64，对称（symmetric）
+- embedding（`embed_tokens`）保留 fp16（非 MatMul，量化收益低且伤质量）
+- 链路：merged bf16 → fp16 ONNX（单图）→ RTN int4
+- 与参考实现 `nicolasembleton/MiniCPM5-2B-onnx` 的 int4 思路一致，区别在于我们是**单图**
+  （prefill/decode 合一、靠动态轴区分），更适合手机 CPU，且权重只存一份
+
+## I/O 契约（APP 端照这个喂）
+
+```
+输入：
+  input_ids                [1, S]          int64
+  attention_mask           [1, P + S]      int64    (1 = 真实 token，0 = pad)
+  position_ids             [1, S]          int64    (绝对位置 = P + arange(S))
+  past_key_values.i.key    [1, 2, P, 128]  float16  i = 0..41
+  past_key_values.i.value  [1, 2, P, 128]  float16
+输出：
+  logits                   [1, S, 130560]  float16
+  present.i.key / present.i.value          [1, 2, P + S, 128]  float16
+```
+
+首轮用 P=0（空张量）做 prefill，之后每步把 `present.*` 原样回喂成 `past.*`，`position_ids = [P]`，
+采样（贪婪 / top-p）在端上做。
+
+## onnxruntime 实测（4 线程 CPU，沙箱 4 核）
+
+| 阶段 | 耗时 |
+| --- | --- |
+| 建 session | 5 s |
+| prefill 237 token | 8 s（≈30 tok/s） |
+| 生成到 EOS（约 30 token） | 共 12 s |
+
+输出（greedy，问北京天气 + `get_weather` 工具）：
 
 ```xml
-<function name="get_weather"><param name="city">Beijing</param><param name="date">2026-10-30</param></function>
+<think>
+</think>
+<function name="get_weather"><param name="city">Beijing</param><param name="date">2023-10-01</param></function>
 ```
 
-llama.cpp 内置的 **minicpm5 parser** 会在服务端把它转成标准 OpenAI `tool_calls` JSON，
-所以上层（APP / 服务端）**不需要写任何 XML 解析**，当成 OpenAI 兼容接口消费即可。
+无工具需求时直接自然语言回答，不会输出 `<function>`。
 
-> 要求：llama.cpp 需包含 `common/parsers/minicpm5.cpp`（较新版本）。
+## 端上还需自己做的三件事
 
-## 用法
+llama.cpp 自带 tokenizer + 模板 + 工具调用解析；走 ORT 这三样要自己实现（都不复杂）：
 
-```bash
-llama-server -m miro-2b-IQ4_XS.gguf -c 8192 -ngl 0 --jinja --port 8080
-```
+1. **分词**：用 `onnx/tokenizer.json`（BPE；可用 ORT Extensions 或 tokenizers 的 FFI）
+2. **模板渲染**：按 `onnx/chat_template.jinja` 渲染（工具定义进 `<tools>` 块 + Tool usage guidelines）
+3. **工具调用解析**：正则抽 `<function name="..."><param name="...">值</param></function>` → OpenAI `tool_calls` JSON
 
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "messages":[{"role":"user","content":"北京明天天气如何？"}],
-  "tools":[{"type":"function","function":{
-     "name":"get_weather","description":"Get weather","parameters":{
-        "type":"object","properties":{
-           "city":{"type":"string"},"date":{"type":"string"}},"required":["city"]}}}]
-}'
-```
+## 训练与复现
 
-无工具需求时模型直接自然语言回答，不会输出 `<function>`。
+- 基座 `insraq/MiniCPM5-2B-heretic-abliterated`（2.52B，已消音）
+- LoRA SFT 200 步（r=16 / α=32，全线性层），数据 ToolACE 2200 + Hermes singleturn 1832 → 2896 条可用
+- 全程用模型自带 chat template 渲染，loss 只算 assistant 轮；loss 1.2883 → 0.1250
+- 完整配方与流水线脚本：`https://github.com/suanx/LLM`（见 `TRAINING.md`、`scripts/`）
 
-## 文件说明
+## 源码资产留存（以后转格式不用重训）
 
-| 文件 | 说明 |
-| --- | --- |
-| `miro-2b-IQ4_XS.gguf` | 主模型文件（含内嵌 chat template 与 tokenizer） |
-| `chat_template.jinja` | 训练与推理共用的原生模板（便于自行渲染语料） |
-| `SHA256SUMS.txt` | 校验和 |
-| `TRAINING.md` | 完整可复现配方 |
-| `train/` | 训练语料与指标 |
-
-## 复现与源码
-
-流水线脚本、语料、训练指标均在 GitHub 仓库：`https://github.com/suanx/LLM`（魔搭仓库为分发渠道）。
+GitHub release **`miro-2b-src`**：LoRA adapter（93 MB）+ merged bf16 分卷（4.7 GB，带 sha256 与重组说明）。
+ONNX 本身在 GitHub release **`miro-2b-onnx`** 也有一份备份。

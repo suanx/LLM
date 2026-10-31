@@ -69,21 +69,13 @@ def cmd_kick():
 
 
 def cmd_push():
-    """Upload a local file by streaming base64 through the exec channel."""
-    import base64
-
+    """Upload a local file with the SDK. NOTE the arg order is (src, dst)."""
     src, dst = sys.argv[2], sys.argv[3]
     s = sbx()
-    data = base64.b64encode(open(src, "rb").read()).decode()
-    tmp = dst + ".b64"
-    s.process.exec(f"rm -f {_shq(tmp)}", timeout=30)
-    step = 4096
-    for i in range(0, len(data), step):
-        chunk = data[i : i + step]
-        redir = ">" if i == 0 else ">>"
-        s.process.exec(f"printf '%s' {_shq(chunk)} {redir} {_shq(tmp)}", timeout=60)
-    r = s.process.exec(f"base64 --decode {_shq(tmp)} > {_shq(dst)} && rm -f {_shq(tmp)} && wc -c {_shq(dst)}", timeout=60)
-    print(getattr(r, "result", r))
+    s.fs.upload_file(src, dst)
+    info = s.process.exec(f"wc -c {_shq(dst)}", timeout=60)
+    print(getattr(info, "result", info))
+    print(f"pushed {src} -> {dst}")
 
 
 def cmd_tail():
@@ -102,9 +94,8 @@ def _shq(x):
 def cmd_upload():
     src, dst = sys.argv[2], sys.argv[3]
     s = sbx()
-    data = open(src, "rb").read()
-    s.fs.upload_file(dst, data)
-    print(f"uploaded {src} -> {dst} ({len(data)} bytes)")
+    s.fs.upload_file(src, dst)
+    print(f"uploaded {src} -> {dst}")
 
 
 def cmd_download():
