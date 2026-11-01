@@ -57,16 +57,34 @@ res
 # ---------------------------------------------------------------- 1. 环境
 step1() {
   echo "=== 1. 依赖 ==="
-  # 魔搭 CPU 镜像通常已带 git/cmake/python3；apt 可能受限，best-effort
-  ( apt-get update -qq && apt-get install -y -qq git cmake build-essential python3-venv ) 2>/dev/null || \
-    echo "[warn] apt 不可用或已装，跳过；下面会检测关键工具"
+  # 1a. 仅当关键工具缺失时才跑 apt（首次已装好，跳过；避免重复 apt-get update 在云上卡网络）
+  local need_apt=0
+  for t in git cmake python3; do command -v $t >/dev/null || need_apt=1; done
+  if [ "$need_apt" -eq 1 ]; then
+    echo "[1a] 安装系统工具(apt)，可能需 1-2 分钟..."
+    ( timeout 180 apt-get update -qq && timeout 400 apt-get install -y -qq git cmake build-essential python3-venv ) 2>/dev/null \
+      || echo "[warn] apt 失败/超时，下面仍会检测关键工具是否已在"
+  else
+    echo "[1a] 系统工具已就绪，跳过 apt"
+  fi
   for t in git cmake python3; do command -v $t >/dev/null || { echo "MISSING $t"; exit 1; }; done
-  python3 -m venv "$BASE/venv_mnn" 2>/dev/null || true
-  "$BASE/venv_mnn/bin/pip" -q install --upgrade pip
-  # torch CPU（走上面设置的清华镜像 PIP_INDEX_URL；不要再指定 download.pytorch.org，境内连不通）
-  "$BASE/venv_mnn/bin/pip" -q install torch
-  "$BASE/venv_mnn/bin/pip" -q install transformers safetensors numpy onnx onnxslim
-  "$BASE/venv_mnn/bin/pip" -q install MNN==$MNN_VER
+
+  # 1b. venv（已存在则复用，不重建）
+  if [ ! -d "$BASE/venv_mnn" ]; then
+    echo "[1b] 创建 venv..."
+    python3 -m venv "$BASE/venv_mnn" || { echo "venv 失败"; exit 1; }
+  else
+    echo "[1b] venv 已存在，复用"
+  fi
+  "$BASE/venv_mnn/bin/pip" install --upgrade pip
+
+  # 1c. python 依赖（去掉 -q 看进度；走上面设置的清华镜像 PIP_INDEX_URL）
+  echo "[1c] 安装 torch (CPU, 约 200MB)..."
+  "$BASE/venv_mnn/bin/pip" install torch
+  echo "[1c] 安装 transformers/safetensors/numpy/onnx/onnxslim..."
+  "$BASE/venv_mnn/bin/pip" install transformers safetensors numpy onnx onnxslim
+  echo "[1c] 安装 MNN==$MNN_VER..."
+  "$BASE/venv_mnn/bin/pip" install "MNN==$MNN_VER"
   "$BASE/venv_mnn/bin/python" -c "import torch, transformers, MNN; print('torch', torch.__version__); print('tf', transformers.__version__); print('MNN ok')"
 }
 run_step 1 step1
