@@ -37,11 +37,7 @@ def sha256_file(p):
 
 
 def remote_ok(fname, want_size):
-    """Return True if remote resolves to HTTP 200 and Content-Length == want_size.
-
-    Uses HEAD + follow-redirects; parses the headers (not body size, which is 0 on
-    HEAD). --max-time guards against a slow/hanging CDN.
-    """
+    """Return True if remote resolves to HTTP 200 and Content-Length == want_size."""
     out = subprocess.run(
         ["curl", "-s", "-I", "-L", "--max-time", "30", f"{REMOTE}/{fname}"],
         capture_output=True, text=True,
@@ -59,6 +55,19 @@ def remote_ok(fname, want_size):
             except ValueError:
                 cl = None
     return code == "200" and cl == want_size
+
+
+def remote_exists(fname):
+    """Cheap HEAD check: True if remote resolves to HTTP 200 (any size)."""
+    out = subprocess.run(
+        ["curl", "-s", "-I", "-L", "--max-time", "30", f"{REMOTE}/{fname}"],
+        capture_output=True, text=True,
+    )
+    for line in out.stdout.splitlines():
+        if line.startswith("HTTP/") and len(line.split()) >= 2:
+            if line.split()[1] == "200":
+                return True
+    return False
 
 
 def download(url, local, want):
@@ -108,14 +117,11 @@ for f in DATA_FILES:
     try:
         local = os.path.join(STAGE, f)
         print(f"=== {f} ===", flush=True)
-        # already on remote?
-        if os.path.exists(local):
-            want_size = os.path.getsize(local)
-        else:
-            want_size = 0
-        if want_size and remote_ok(f, want_size):
-            print(f"  already on remote (200 + size match), skip", flush=True)
+        # already on remote?  Skip entirely (don't re-download) if HEAD returns 200.
+        if remote_exists(f):
+            print(f"  already on remote (HTTP 200), skip", flush=True)
             continue
+        want_size = os.path.getsize(local) if os.path.exists(local) else 0
         # download if needed
         if not os.path.exists(local) or (sums.get(f) and sha256_file(local) != sums[f]):
             if not download(f"{BASE_URL}/{f}", local, sums.get(f)):
