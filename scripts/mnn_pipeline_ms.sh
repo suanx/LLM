@@ -22,9 +22,10 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export TOKENIZERS_PARALLELISM=false
 export MALLOC_ARENA_MAX=2
 # 本脚本运行在阿里云(境内)云 IDE 上，直连 pypi.org / download.pytorch.org 不通。
-# 用清华镜像加速 pip（仅限这台机器，不影响用户本机"不走镜像"的原则）。
-export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+# 用阿里云自己的 pip 镜像（同机房内网，这台机器上最快最稳；仅限这台机器，
+# 不影响用户本机"不走镜像"的原则）。torch 默认是 CUDA 大轮，走内网镜像才能稳下完。
+export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+export PIP_TRUSTED_HOST=mirrors.aliyun.com
 
 MNN_VER=${MNN_VER:-3.6.2}
 
@@ -49,6 +50,18 @@ run_step() {
 
 # 每步前后打印资源，便于判断是否要扩/清理
 res() { echo "--- disk ---"; df -h "$WS" | tail -1; echo "--- mem ---"; free -g | head -2; echo "--- cpu ---"; nproc; }
+
+# 带重试的 pip 安装：失败可见、不静默跳过；最多 3 次
+pipi() {
+  local desc="$1"; shift
+  for i in 1 2 3; do
+    echo "  -> 安装 $desc (第 $i 次尝试)..."
+    if "$BASE/venv_mnn/bin/pip" install "$@"; then return 0; fi
+    echo "  [warn] $desc 安装失败，3 秒后重试..."
+    sleep 3
+  done
+  echo "  [FAIL] $desc 安装失败，中止流程"; return 1
+}
 
 mkdir -p "$BASE"
 keepalive_start
@@ -78,14 +91,12 @@ step1() {
   fi
   "$BASE/venv_mnn/bin/pip" install --upgrade pip
 
-  # 1c. python 依赖（去掉 -q 看进度；走上面设置的清华镜像 PIP_INDEX_URL）
-  echo "[1c] 安装 torch (CPU, 约 200MB)..."
-  "$BASE/venv_mnn/bin/pip" install torch
-  echo "[1c] 安装 transformers/safetensors/numpy/onnx/onnxslim..."
-  "$BASE/venv_mnn/bin/pip" install transformers safetensors numpy onnx onnxslim
-  echo "[1c] 安装 MNN==$MNN_VER..."
-  "$BASE/venv_mnn/bin/pip" install "MNN==$MNN_VER"
-  "$BASE/venv_mnn/bin/python" -c "import torch, transformers, MNN; print('torch', torch.__version__); print('tf', transformers.__version__); print('MNN ok')"
+  # 1c. python 依赖（走上面设置的阿里云 pip 镜像；带重试）
+  # 注：torch 不在 step1 装，留给 step5 按 MNN 官方 requirements.txt 的版本装，避免版本冲突/重复下载
+  pipi "transformers/safetensors/numpy/onnx/onnxslim" transformers safetensors numpy onnx onnxslim || exit 1
+  pipi "MNN==$MNN_VER" "MNN==$MNN_VER" || exit 1
+  "$BASE/venv_mnn/bin/python" -c "import transformers, MNN; print('tf', transformers.__version__); print('MNN ok')" \
+    || { echo "[FAIL] 依赖导入自检失败"; exit 1; }
 }
 run_step 1 step1
 
@@ -168,7 +179,7 @@ run_step 4 step4
 step5() {
   echo "=== 5. 导出 ==="
   cd "$BASE/MNN/transformers/llm/export"
-  "$BASE/venv_mnn/bin/pip" -q install -r requirements.txt
+  pipi "MNN export 依赖(含 torch)" -r requirements.txt || exit 1
   rm -rf "$BASE/mnn_out"
   res
   "$BASE/venv_mnn/bin/python" llmexport.py \
