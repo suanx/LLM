@@ -21,6 +21,10 @@ STEP=${STEP:-0}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export TOKENIZERS_PARALLELISM=false
 export MALLOC_ARENA_MAX=2
+# 本脚本运行在阿里云(境内)云 IDE 上，直连 pypi.org / download.pytorch.org 不通。
+# 用清华镜像加速 pip（仅限这台机器，不影响用户本机"不走镜像"的原则）。
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
 MNN_VER=${MNN_VER:-3.6.2}
 
@@ -59,8 +63,8 @@ step1() {
   for t in git cmake python3; do command -v $t >/dev/null || { echo "MISSING $t"; exit 1; }; done
   python3 -m venv "$BASE/venv_mnn" 2>/dev/null || true
   "$BASE/venv_mnn/bin/pip" -q install --upgrade pip
-  # torch CPU（官方源；魔搭机器若在境内太慢，可临时加 -i https://pypi.tuna.tsinghua.edu.cn/simple）
-  "$BASE/venv_mnn/bin/pip" -q install torch --index-url https://download.pytorch.org/whl/cpu
+  # torch CPU（走上面设置的清华镜像 PIP_INDEX_URL；不要再指定 download.pytorch.org，境内连不通）
+  "$BASE/venv_mnn/bin/pip" -q install torch
   "$BASE/venv_mnn/bin/pip" -q install transformers safetensors numpy onnx onnxslim
   "$BASE/venv_mnn/bin/pip" -q install MNN==$MNN_VER
   "$BASE/venv_mnn/bin/python" -c "import torch, transformers, MNN; print('torch', torch.__version__); print('tf', transformers.__version__); print('MNN ok')"
