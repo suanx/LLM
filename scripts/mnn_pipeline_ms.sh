@@ -108,15 +108,16 @@ step2() {
   if [ -d "$BASE/merged" ] && [ -f "$BASE/merged/config.json" ]; then
     echo "已存在，跳过"; return 0
   fi
-  BASE_URL=https://github.com/suanx/LLM/releases/download/miro-2b-src
+  # 改用魔搭 hub 同 CDN 拉（阿里云机器从 GitHub 拉 4.8G 极慢且易断）；源由 ms_mirror_merged.py 同步过去
+  BASE_URL=https://www.modelscope.cn/models/Kobexz/miro-2b/resolve/master/merged_bf16
   SUMS=$BASE/SHA256SUMS-src.txt
-  curl -sL --retry 3 -o "$SUMS" "$BASE_URL/SHA256SUMS-src.txt" || return 1
+  curl -L --retry 3 --progress-bar -o "$SUMS" "$BASE_URL/SHA256SUMS-src.txt" || return 1
   cat "$SUMS"
   rm -rf "$BASE/merged"; mkdir -p "$BASE/merged"
   (
     for p in 00 01 02; do
       F="miro-2b-merged-bf16.tar.part-$p"
-      curl -sL --retry 3 -o "$BASE/$F" "$BASE_URL/$F" || exit 1
+      curl -L --retry 3 --progress-bar -o "$BASE/$F" "$BASE_URL/$F" || exit 1
       WANT=$(grep -a "  $F\$" "$SUMS" | cut -d' ' -f1)
       GOT=$(sha256sum "$BASE/$F" | cut -d' ' -f1)
       echo "$F want=$WANT got=$GOT"
