@@ -68,7 +68,13 @@ def download(url, local, want):
             return True
         os.remove(local)
     for _ in range(3):
-        subprocess.run(["curl", "-sL", "--retry", "3", "-C", "-", "-o", local, url], check=True)
+        rc = subprocess.run(
+            ["curl", "-sL", "--retry", "3", "-C", "-", "-o", local, url]
+        ).returncode
+        if rc != 0:
+            print(f"  curl rc={rc}, retry {os.path.basename(local)}", flush=True)
+            time.sleep(5)
+            continue
         got = sha256_file(local)
         if not want or got == want:
             print(f"  downloaded+verified {os.path.basename(local)} ({os.path.getsize(local)} B)", flush=True)
@@ -99,38 +105,42 @@ for line in open(os.path.join(STAGE, SUMS_FILE)):
         sums[parts[1].strip()] = parts[0].strip()
 
 for f in DATA_FILES:
-    local = os.path.join(STAGE, f)
-    print(f"=== {f} ===", flush=True)
-    # already on remote?
-    if os.path.exists(local):
-        want_size = os.path.getsize(local)
-    else:
-        want_size = 0
-    if remote_ok(f, want_size) if want_size else False:
-        print(f"  already on remote (200 + size match), skip", flush=True)
-        continue
-    # download if needed
-    if not os.path.exists(local) or (sums.get(f) and sha256_file(local) != sums[f]):
-        if not download(f"{BASE_URL}/{f}", local, sums.get(f)):
-            print(f"DOWNLOAD FAILED {f}", flush=True)
+    try:
+        local = os.path.join(STAGE, f)
+        print(f"=== {f} ===", flush=True)
+        # already on remote?
+        if os.path.exists(local):
+            want_size = os.path.getsize(local)
+        else:
+            want_size = 0
+        if want_size and remote_ok(f, want_size):
+            print(f"  already on remote (200 + size match), skip", flush=True)
             continue
-    want_size = os.path.getsize(local)
-    dst = f"merged_bf16/{f}"
-    ok = False
-    for attempt in range(1, 4):
-        rc = upload_one(local, dst)
-        if remote_ok(f, want_size):
-            ok = True
-            break
-        print(f"  upload rc={rc}; remote not ready yet (attempt {attempt}/3), wait 30s", flush=True)
-        time.sleep(30)
-    if ok:
-        print(f"  DONE {dst} (verified on remote)", flush=True)
-        try:
-            os.remove(local)
-        except OSError:
-            pass
-    else:
-        print(f"  STILL MISSING {dst} — leaving local for retry", flush=True)
+        # download if needed
+        if not os.path.exists(local) or (sums.get(f) and sha256_file(local) != sums[f]):
+            if not download(f"{BASE_URL}/{f}", local, sums.get(f)):
+                print(f"DOWNLOAD FAILED {f}", flush=True)
+                continue
+        want_size = os.path.getsize(local)
+        dst = f"merged_bf16/{f}"
+        ok = False
+        for attempt in range(1, 4):
+            rc = upload_one(local, dst)
+            if remote_ok(f, want_size):
+                ok = True
+                break
+            print(f"  upload rc={rc}; remote not ready yet (attempt {attempt}/3), wait 30s", flush=True)
+            time.sleep(30)
+        if ok:
+            print(f"  DONE {dst} (verified on remote)", flush=True)
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+        else:
+            print(f"  STILL MISSING {dst} — leaving local for retry", flush=True)
+    except Exception as e:
+        print(f"  ERROR on {f}: {e!r} — continue next file", flush=True)
+        continue
 
 print("MS_MIRROR_REMAINING_DONE", flush=True)
