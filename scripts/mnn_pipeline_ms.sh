@@ -12,6 +12,9 @@
 #   STEP=3 bash mnn_pipeline_ms.sh     # 从第 3 步开始
 set -o pipefail
 
+# 脚本所在目录（用于定位 ms_get.py）
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 # ---- 基础路径（必须都在持久化目录）----
 WS=/mnt/workspace
 BASE=$WS/miro2b
@@ -101,32 +104,38 @@ step1() {
 run_step 1 step1
 
 # ------------------------------------------------- 2. 拉合并后的 bf16 权重
-# 来源：github.com/suanx/LLM release `miro-2b-src`（3 分片，合计 ~4.8G）
-# 流式下载 + 边校验边 tar 解开。若魔搭机器访问 github 太慢/被墙，告诉我，我先把分卷镜像到魔搭 hub 再拉。
+# 来源：魔搭 hub Kobexz/miro-2b 的 merged_bf16/（3 分片，合计 ~4.8G）
+# 已验证：源 tar 合法、sha256 与 SUMS 一致。本步先下载 3 分片 -> 校验 -> 拼成文件 -> tar xf 解包
+# （早期版本用管道喂 tar，且把校验 echo 写进了 stdout 污染了 tar 流，导致“不是 tar 归档”报错）
 step2() {
   echo "=== 2. 拉取 merged bf16 ==="
   if [ -d "$BASE/merged" ] && [ -f "$BASE/merged/config.json" ]; then
     echo "已存在，跳过"; return 0
   fi
-  # 改用魔搭 hub 同 CDN 拉（阿里云机器从 GitHub 拉 4.8G 极慢且易断）；源由 ms_mirror_merged.py 同步过去
-  BASE_URL=https://www.modelscope.cn/models/Kobexz/miro-2b/resolve/master/merged_bf16
-  SUMS=$BASE/SHA256SUMS-src.txt
-  curl -L --retry 3 --progress-bar -o "$SUMS" "$BASE_URL/SHA256SUMS-src.txt" || return 1
-  cat "$SUMS"
-  rm -rf "$BASE/merged"; mkdir -p "$BASE/merged"
-  (
-    for p in 00 01 02; do
-      F="miro-2b-merged-bf16.tar.part-$p"
-      curl -L --retry 3 --progress-bar -o "$BASE/$F" "$BASE_URL/$F" || exit 1
-      WANT=$(grep -a "  $F\$" "$SUMS" | cut -d' ' -f1)
-      GOT=$(sha256sum "$BASE/$F" | cut -d' ' -f1)
-      echo "$F want=$WANT got=$GOT"
-      [ "$WANT" = "$GOT" ] || exit 1
-      cat "$BASE/$F"
-      rm -f "$BASE/$F"
-      df -h "$WS" | tail -1 >&2
-    done
-  ) | tar x -C "$BASE/merged" || return 1
+  REPO=Kobexz/miro-2b
+  PREFIX=merged_bf16
+  PARTS="miro-2b-merged-bf16.tar.part-00 miro-2b-merged-bf16.tar.part-01 miro-2b-merged-bf16.tar.part-02"
+  SUMS_F=SHA256SUMS-src.txt
+  PYDL="$BASE/venv_mnn/bin/python"
+  GET="$SCRIPT_DIR/ms_get.py"
+  # 非强制安装 modelscope（云 IDE 内网快路径用；装不上就走 curl 回退）
+  "$PYDL" -m pip install -q modelscope 2>/dev/null || echo "[warn] modelscope 未安装，下载走 curl 回退"
+  rm -rf "$BASE/merged" "$BASE/_parts" "$BASE/_merged.tar"
+  mkdir -p "$BASE/merged" "$BASE/_parts"
+  for F in $SUMS_F $PARTS; do
+    echo "[下载] $PREFIX/$F" >&2
+    "$PYDL" "$GET" "$REPO" "$PREFIX/$F" "$BASE/_parts/$F" || { echo "DOWNLOAD FAIL $F"; return 1; }
+    if [ "$F" != "$SUMS_F" ]; then
+      WANT=$(grep -a "  $F\$" "$BASE/_parts/$SUMS_F" 2>/dev/null | cut -d' ' -f1)
+      GOT=$(sha256sum "$BASE/_parts/$F" | cut -d' ' -f1)
+      echo "[校验] $F want=$WANT got=$GOT" >&2
+      if [ "$WANT" != "$GOT" ]; then echo "CHECKSUM FAIL $F（重新下载或换源）"; return 1; fi
+    fi
+  done
+  # 拼接成单个 tar 再从文件解包（避免管道污染）
+  cat "$BASE/_parts"/miro-2b-merged-bf16.tar.part-* > "$BASE/_merged.tar"
+  tar xf "$BASE/_merged.tar" -C "$BASE/merged" || { echo "TAR EXTRACT FAIL"; return 1; }
+  rm -rf "$BASE/_parts" "$BASE/_merged.tar"
   ls -la "$BASE/merged"
 }
 run_step 2 step2
